@@ -1,7 +1,7 @@
 import os
 import csv
 import argparse
-import time
+import dotenv
 import json
 import base64
 from pathlib import Path
@@ -9,6 +9,13 @@ from typing import Optional, Dict
 from pydantic import BaseModel, Field
 from google import genai
 from openai import OpenAI
+
+dotenv.load_dotenv()
+
+
+#########################
+# TODO: make sure response doesn't contain any new lines that will affect the csv
+#########################
 
 # Custom schema matching the UTEL University feedback form
 class UTELFormData(BaseModel):
@@ -45,128 +52,215 @@ def setup_llama_client():
         api_key=api_key,
     )
 
-def process_with_gemini(client, image_path):
+def process_with_gemini(client, image_path, timeout=60, max_retries=2):
     """Process a UTEL University feedback form with Gemini"""
-    try:
-        # Read the image file
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
-        
-        # Determine mime type based on file extension
-        ext = Path(image_path).suffix.lower()
-        mime_type = "image/jpeg"  # Default
-        if ext == ".png":
-            mime_type = "image/png"
-        elif ext in (".jpg", ".jpeg"):
-            mime_type = "image/jpeg"
-        elif ext == ".webp":
-            mime_type = "image/webp"
-        
-        # Create specific prompt for UTEL form extraction
-        prompt = """
-        Extract the following information from this UTEL University feedback form:
-        1. Nombre (Name): Look for "Nombre:" field and extract the handwritten name
-        2. Matrícula (Student ID): Look for "Matrícula:" field and extract the ID number
-        3. Correo electrónico (Email): Look for "Correo electrónico:" field and extract the email address
-        4. Calificación evento: Identify which option is marked with X (Excelente, Buena, Aceptable, or Mejorable)
-        5. Comentario adicional: Extract any handwritten comment in the suggestions section
-        6. Actividad tiempo libre: Extract the response to the question about hobbies/free time activities
-        7. Área apoyo: Identify which support area is marked with X (Académico, Administrativo, Aula Virtual, Comunicación, or Otro)
-        8. Detalles situación: Extract the handwritten details about their situation
-        
-        Return the extracted data in structured format according to the schema.
-        """
-        
-        # Generate content with structured output
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[
-                prompt,
-                genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-            ],
-            config={
-                'response_mime_type': 'application/json',
-                'response_schema': UTELFormData,
-            }
-        )
-        return response.parsed
+    for retry in range(max_retries + 1):
+        try:
+            if retry > 0:
+                print(f"Retry {retry}/{max_retries} for Gemini processing of {image_path}")
+                
+            # Read the image file
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
             
-    except Exception as e:
-        print(f"Error processing with Gemini {image_path}: {e}")
-        raise
-
-def process_with_llama(client, image_path, site_url="https://example.com", site_name="UTEL Form Extractor"):
-    """Process a UTEL University feedback form with Llama 3.2 via OpenRouter"""
-    try:
-        # Convert image to base64
-        with open(image_path, "rb") as f:
-            image_data = f.read()
-            base64_image = base64.b64encode(image_data).decode('utf-8')
-        
-        # Determine mime type based on file extension
-        ext = Path(image_path).suffix.lower()
-        mime_type = "image/jpeg"  # Default
-        if ext == ".png":
-            mime_type = "image/png"
-        elif ext in (".jpg", ".jpeg"):
-            mime_type = "image/jpeg"
-        elif ext == ".webp":
-            mime_type = "image/webp"
+            # Determine mime type based on file extension
+            ext = Path(image_path).suffix.lower()
+            mime_type = "image/jpeg"  # Default
+            if ext == ".png":
+                mime_type = "image/png"
+            elif ext in (".jpg", ".jpeg"):
+                mime_type = "image/jpeg"
+            elif ext == ".webp":
+                mime_type = "image/webp"
             
-        data_url = f"data:{mime_type};base64,{base64_image}"
-        
-        prompt = """
-        Extract information from this UTEL University feedback form.
-        
-        Please extract the following fields and provide them in a JSON format:
-        - nombre: The student's name from the "Nombre:" field
-        - matricula: The student ID from the "Matrícula:" field
-        - correo_electronico: The email from the "Correo electrónico:" field
-        - calificacion_evento: Which option is marked with X (Excelente, Buena, Aceptable, or Mejorable)
-        - comentario_adicional: Any handwritten comment in the suggestions section
-        - actividad_tiempo_libre: The response about hobbies/free time activities
-        - area_apoyo: Which support area is marked with X (Académico, Administrativo, Aula Virtual, Comunicación, or Otro)
-        - detalles_situacion: The handwritten details about their situation
-        
-        IMPORTANT: Return ONLY a valid JSON object with these fields, nothing else.
-        """
-        
-        completion = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": site_url,
-                "X-Title": site_name,
-            },
-            model="meta-llama/llama-3.2-11b-vision-instruct:free",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": data_url
-                            }
+            # Create specific prompt for UTEL form extraction
+            prompt = """
+            Extract the following information from this UTEL University feedback form:
+            1. Nombre (Name): Look for "Nombre:" field and extract the handwritten name
+            2. Matrícula (Student ID): Look for "Matrícula:" field and extract the ID number
+            3. Correo electrónico (Email): Look for "Correo electrónico:" field and extract the email address
+            4. Calificación evento: Identify which option is marked with X (Excelente, Buena, Aceptable, or Mejorable)
+            5. Comentario adicional: Extract any handwritten comment in the suggestions section
+            6. Actividad tiempo libre: Extract the response to the question about hobbies/free time activities
+            7. Área apoyo: Identify which support area is marked with X (Académico, Administrativo, Aula Virtual, Comunicación, or Otro)
+            8. Detalles situación: Extract the handwritten details about their situation
+            
+            Return the extracted data in structured format according to the schema.
+            """
+            
+            try:
+                # Generate content with structured output with timeout
+                import concurrent.futures
+                import time
+                
+                def generate_with_timeout():
+                    return client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=[
+                            prompt,
+                            genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+                        ],
+                        config={
+                            'response_mime_type': 'application/json',
+                            'response_schema': UTELFormData,
                         }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"}
-        )
-        
-        # Parse the JSON response
-        response_text = completion.choices[0].message.content
-        response_data = json.loads(response_text)
-        
-        # Convert to Pydantic model
-        return UTELFormData(**response_data)
+                    )
+                
+                # Use ThreadPoolExecutor to implement timeout
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(generate_with_timeout)
+                    try:
+                        response = future.result(timeout=timeout)  # Use provided timeout
+                        if response and hasattr(response, 'parsed'):
+                            result = response.parsed
+                            # Log the extracted data for debugging
+                            if hasattr(result, 'model_dump'):
+                                print(f"Gemini extracted data: {json.dumps(result.model_dump(), indent=2)[:500]}...")
+                            elif hasattr(result, 'dict'):
+                                print(f"Gemini extracted data: {json.dumps(result.dict(), indent=2)[:500]}...")
+                            return result
+                        else:
+                            print(f"Warning: Empty or invalid response from Gemini for {image_path}")
+                            if retry < max_retries:
+                                continue  # Try again
+                            return UTELFormData()
+                    except concurrent.futures.TimeoutError:
+                        print(f"Timeout error processing with Gemini for {image_path}")
+                        if retry < max_retries:
+                            continue  # Try again
+                        return UTELFormData()
+                    
+            except Exception as e:
+                print(f"Error in Gemini API call for {image_path}: {e}")
+                if retry < max_retries:
+                    continue  # Try again
+                return UTELFormData()
+                
+        except Exception as e:
+            print(f"Error processing with Gemini {image_path}: {e}")
+            if retry < max_retries:
+                continue  # Try again
+            return UTELFormData()  # Return empty model instead of raising exception
+    
+    # If we get here, all retries failed
+    return UTELFormData()
+
+def process_with_llama(client, image_path, site_url="https://example.com", site_name="UTEL Form Extractor", timeout=60, max_retries=2):
+    """Process a UTEL University feedback form with Llama 3.2 via OpenRouter"""
+    for retry in range(max_retries + 1):
+        try:
+            if retry > 0:
+                print(f"Retry {retry}/{max_retries} for Llama processing of {image_path}")
+                
+            # Convert image to base64
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+                base64_image = base64.b64encode(image_data).decode('utf-8')
             
-    except Exception as e:
-        print(f"Error processing with Llama {image_path}: {e}")
-        raise
+            # Determine mime type based on file extension
+            ext = Path(image_path).suffix.lower()
+            mime_type = "image/jpeg"  # Default
+            if ext == ".png":
+                mime_type = "image/png"
+            elif ext in (".jpg", ".jpeg"):
+                mime_type = "image/jpeg"
+            elif ext == ".webp":
+                mime_type = "image/webp"
+                
+            data_url = f"data:{mime_type};base64,{base64_image}"
+            
+            prompt = """
+            Extract the following information from this UTEL University feedback form image. For each field, carefully look at the form and extract the exact text or marked option:
+
+            1. For "Nombre:" field - Look for the handwritten name and extract it exactly as written
+            2. For "Matrícula:" field - Find and extract the student ID number
+            3. For "Correo electrónico:" field - Extract the complete email address
+            4. For "Calificación del evento:" section - Find which option (Excelente, Buena, Aceptable, or Mejorable) is marked with an X
+            5. For the suggestions section - Extract any handwritten comment word for word
+            6. For the free time activities question - Copy the exact response about what activities they enjoy
+            7. For "Área de apoyo:" section - Identify which option (Académico, Administrativo, Aula Virtual, Comunicación, or Otro) is marked
+            8. For the situation details - Copy the complete handwritten explanation
+
+            Format your response as a JSON object with these exact fields:
+            {
+                "nombre": "extracted name",
+                "matricula": "extracted ID",
+                "correo_electronico": "extracted email",
+                "calificacion_evento": "marked option",
+                "comentario_adicional": "extracted comment",
+                "actividad_tiempo_libre": "extracted activities",
+                "area_apoyo": "marked area",
+                "detalles_situacion": "extracted details"
+            }
+
+            If you cannot read or determine a field clearly, use null for that field. Return ONLY the JSON object, no other text.
+            """
+            
+            try:
+                completion = client.chat.completions.create(
+                    extra_headers={
+                        "HTTP-Referer": site_url,
+                        "X-Title": site_name,
+                    },
+                    model="meta-llama/llama-3.2-11b-vision-instruct:free",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": data_url
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                    timeout=120  # Increased timeout to 120 seconds
+                )
+                
+                # Check if completion and choices exist
+                if not completion or not completion.choices or not completion.choices[0].message.content:
+                    print(f"Warning: Empty or invalid response from Llama for {image_path}")
+                    if retry < max_retries:
+                        continue  # Try again
+                    return UTELFormData()
+                
+                # Parse the JSON response
+                response_text = completion.choices[0].message.content
+                
+                try:
+                    response_data = json.loads(response_text)
+                    # Log the extracted data for debugging
+                    print(f"Llama extracted data: {json.dumps(response_data, indent=2)[:500]}...")
+                    # Convert to Pydantic model
+                    return UTELFormData(**response_data)
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON from Llama response for {image_path}: {e}")
+                    print(f"Raw response: {response_text[:500]}...")  # Print first 500 chars of response
+                    if retry < max_retries:
+                        continue  # Try again
+                    return UTELFormData()
+                    
+            except Exception as e:
+                print(f"Error in OpenAI API call for {image_path}: {e}")
+                if retry < max_retries:
+                    continue  # Try again
+                return UTELFormData()
+                
+        except Exception as e:
+            print(f"Error processing with Llama {image_path}: {e}")
+            if retry < max_retries:
+                continue  # Try again
+            return UTELFormData()  # Return empty model instead of raising exception
+    
+    # If we get here, all retries failed
+    return UTELFormData()
 
 def compare_results(gemini_data, llama_data):
     """
@@ -175,6 +269,15 @@ def compare_results(gemini_data, llama_data):
     Returns:
         Tuple of (merged_data, has_discrepancies, discrepancies_dict)
     """
+    # Handle cases where one model might have failed
+    if gemini_data is None:
+        print("Warning: Gemini data is None, using empty model")
+        gemini_data = UTELFormData()
+        
+    if llama_data is None:
+        print("Warning: Llama data is None, using empty model")
+        llama_data = UTELFormData()
+    
     # Convert to dictionaries
     if hasattr(gemini_data, 'model_dump'):
         gemini_dict = gemini_data.model_dump()
@@ -198,59 +301,131 @@ def compare_results(gemini_data, llama_data):
             if (not gemini_dict[key] and not llama_dict[key]):
                 continue
                 
-            # Check if values are different (ignoring case and whitespace for simple comparison)
-            gemini_val = str(gemini_dict[key]).lower().strip() if gemini_dict[key] else ""
-            llama_val = str(llama_dict[key]).lower().strip() if llama_dict[key] else ""
-            
-            if gemini_val != llama_val:
+            # Check for discrepancies
+            if gemini_dict[key] != llama_dict[key]:
                 discrepancies[key] = {
                     "gemini": gemini_dict[key],
                     "llama": llama_dict[key]
                 }
+                print(f"Discrepancy in field '{key}':")
+                print(f"  - Gemini: '{gemini_dict[key]}'")
+                print(f"  - Llama:  '{llama_dict[key]}'")
     
-    # Merge data with preference for values that agree
-    merged_data = {}
-    for key in gemini_dict:
-        if key in discrepancies:
-            # For discrepancies, prefer Gemini but mark as unverified
-            merged_data[key] = gemini_dict[key]
-            merged_data[f"{key}_verified"] = False
-        else:
-            merged_data[key] = gemini_dict[key]
-            merged_data[f"{key}_verified"] = True
+    # Merge data, preferring Gemini when there are discrepancies
+    merged_data = UTELFormData(**gemini_dict)
     
+    # Store discrepancies in the model for later use
+    setattr(merged_data, '_discrepancies', discrepancies)
+    
+    # Add verification fields if there are discrepancies
     has_discrepancies = len(discrepancies) > 0
+    
     return merged_data, has_discrepancies, discrepancies
 
-def save_to_csv(data_list, output_file, include_verification=True):
+def save_to_csv(data_list, output_file, include_verification=True, append=False):
     """Save extracted form data to a CSV file"""
     if not data_list:
-        print("No data to save.")
+        print("No data to save to CSV.")
         return
+        
+    # Determine fields based on the first item
+    first_item = data_list[0]
+    if hasattr(first_item, 'model_dump'):
+        fields = list(first_item.model_dump().keys())
+    elif hasattr(first_item, 'dict'):
+        fields = list(first_item.dict().keys())
+    else:
+        fields = list(first_item.keys())
     
-    # Get field names from the first item
-    field_names = list(data_list[0].keys())
+    # Add verification fields if requested
+    all_fields = fields.copy()
+    if include_verification:
+        for field in fields:
+            all_fields.append(f"{field}_verified")
     
-    # If we don't want verification fields, filter them out
-    if not include_verification:
-        field_names = [field for field in field_names if not field.endswith("_verified")]
-        data_list = [{k: v for k, v in item.items() if not k.endswith("_verified")} 
-                     for item in data_list]
-    
-    # Write the data to the CSV file
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=field_names)
-        writer.writeheader()
-        writer.writerows(data_list)
-    
-    print(f"Data saved to {output_file}")
-    print(f"Processed {len(data_list)} forms successfully")
+    # Check if file exists and we're appending
+    file_exists = os.path.isfile(output_file) and append
 
-def save_discrepancies(discrepancies_list, output_file):
+    # Write to CSV
+    mode = 'a' if file_exists else 'w'
+    with open(output_file, mode, newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=all_fields)
+        
+        # Only write header if creating a new file
+        if not file_exists:
+            writer.writeheader()
+        
+        for item in data_list:
+            # Convert to dict if needed
+            if hasattr(item, 'model_dump'):
+                row = item.model_dump()
+            elif hasattr(item, 'dict'):
+                row = item.dict()
+            else:
+                row = item
+                
+            # Add verification fields if requested
+            if include_verification:
+                # Get verification status from the discrepancies dict
+                # We assume all fields are verified unless they're in the discrepancies
+                for field in fields:
+                    row[f"{field}_verified"] = True  # Default to verified
+                
+                # Mark fields with discrepancies as unverified
+                if hasattr(item, '_discrepancies') and item._discrepancies:
+                    for field in item._discrepancies:
+                        if field in fields:
+                            row[f"{field}_verified"] = False
+            
+            writer.writerow(row)
+    
+    if not append:
+        print(f"Data saved to {output_file}")
+    else:
+        print(f"Data appended to {output_file}")
+
+def save_discrepancies(discrepancies_list, output_file, append=False):
     """Save discrepancies to a JSON file for review"""
+    # If appending, read existing discrepancies first
+    existing_discrepancies = []
+    if append and os.path.isfile(output_file):
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                existing_discrepancies = json.load(f)
+        except json.JSONDecodeError:
+            print(f"Warning: Could not read existing discrepancies from {output_file}, creating new file")
+            append = False
+    
+    # Combine existing and new discrepancies
+    if append:
+        all_discrepancies = existing_discrepancies + discrepancies_list
+    else:
+        all_discrepancies = discrepancies_list
+    
+    # Write to file
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(discrepancies_list, f, ensure_ascii=False, indent=2)
-    print(f"Discrepancies saved to {output_file}")
+        json.dump(all_discrepancies, f, ensure_ascii=False, indent=2)
+    
+    if append:
+        print(f"Discrepancies appended to {output_file}")
+    else:
+        print(f"Discrepancies saved to {output_file}")
+
+def load_checkpoint(checkpoint_file):
+    """Load checkpoint from file"""
+    try:
+        with open(checkpoint_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        print(f"Warning: Could not read checkpoint from {checkpoint_file}, starting from scratch")
+        return None
+
+def save_checkpoint(checkpoint_file, checkpoint_data):
+    """Save checkpoint to file"""
+    with open(checkpoint_file, 'w', encoding='utf-8') as f:
+        json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
 
 def main():
     """Main function to run the UTEL form processing script"""
@@ -261,27 +436,57 @@ def main():
     parser.add_argument('--site-name', default="UTEL Form Extractor", help='Your site name for OpenRouter attribution')
     parser.add_argument('--verification', action='store_true', help='Include verification fields in CSV output')
     parser.add_argument('--discrepancies', help='Path to save discrepancies JSON file (optional)')
+    parser.add_argument('--skip-llama', action='store_true', help='Skip processing with Llama model')
+    parser.add_argument('--skip-gemini', action='store_true', help='Skip processing with Gemini model')
+    parser.add_argument('--timeout', type=int, default=60, help='Timeout in seconds for API calls (default: 60)')
+    parser.add_argument('--max-retries', type=int, default=2, help='Maximum number of retries for API calls (default: 2)')
+    parser.add_argument('--max-forms', type=int, help='Maximum number of forms to process (optional)')
+    parser.add_argument('--resume', action='store_true', help='Resume from checkpoint if available')
+    parser.add_argument('--checkpoint-file', default='.checkpoint.json', help='Path to checkpoint file (default: .checkpoint.json)')
     args = parser.parse_args()
     
     # Setup clients
-    gemini_client = setup_gemini_client()
-    llama_client = setup_llama_client()
+    gemini_client = None if args.skip_gemini else setup_gemini_client()
+    llama_client = None if args.skip_llama else setup_llama_client()
+    
+    if not gemini_client and not llama_client:
+        raise ValueError("At least one model client must be enabled")
     
     input_path = Path(args.input)
+    
+    # Load checkpoint if resuming
+    checkpoint_data = None
+    if args.resume:
+        checkpoint_data = load_checkpoint(args.checkpoint_file)
     
     # Process single image or directory of images
     results_list = []
     discrepancies_list = []
+    processed_files = []
     
     if input_path.is_file():
         # Process a single form image
         print(f"Processing single form: {input_path}")
         try:
             # Process with both models
-            gemini_data = process_with_gemini(gemini_client, input_path)
-            print("✓ Gemini processing complete")
-            llama_data = process_with_llama(llama_client, input_path, args.site_url, args.site_name)
-            print("✓ Llama processing complete")
+            gemini_data = None
+            llama_data = None
+            
+            if gemini_client:
+                try:
+                    gemini_data = process_with_gemini(gemini_client, input_path, timeout=args.timeout, max_retries=args.max_retries)
+                    print("✓ Gemini processing complete")
+                except Exception as e:
+                    print(f"Error processing with Gemini {input_path}: {e}")
+                    gemini_data = UTELFormData()
+            
+            if llama_client:
+                try:
+                    llama_data = process_with_llama(llama_client, input_path, args.site_url, args.site_name, timeout=args.timeout, max_retries=args.max_retries)
+                    print("✓ Llama processing complete")
+                except Exception as e:
+                    print(f"Error processing with Llama {input_path}: {e}")
+                    llama_data = UTELFormData()
             
             # Compare and merge results
             merged_data, has_discrepancies, discrepancies = compare_results(gemini_data, llama_data)
@@ -296,6 +501,14 @@ def main():
             else:
                 print(f"✓ Both models agree on all fields for {input_path.name}")
                 
+            # Save the extracted data to CSV
+            save_to_csv(results_list, args.output, include_verification=args.verification, append=False)
+            print(f"\nResults saved to {args.output}")
+            
+            # Save discrepancies if requested
+            if discrepancies_list and args.discrepancies:
+                save_discrepancies(discrepancies_list, args.discrepancies, append=False)
+            
         except Exception as e:
             print(f"Failed to process {input_path.name}: {str(e)}")
     
@@ -305,42 +518,88 @@ def main():
         form_images = [f for f in input_path.iterdir() 
                       if f.suffix.lower() in image_extensions]
         
-        print(f"Found {len(form_images)} forms to process")
+        # Limit the number of forms if max-forms is specified
+        if args.max_forms and args.max_forms > 0 and args.max_forms < len(form_images):
+            print(f"Limiting to {args.max_forms} forms (out of {len(form_images)} found)")
+            form_images = form_images[:args.max_forms]
+        else:
+            print(f"Found {len(form_images)} forms to process")
+            
+        # Resume from checkpoint if available
+        if args.resume and checkpoint_data and 'processed_files' in checkpoint_data:
+            processed_files = checkpoint_data['processed_files']
+            skipped_count = sum(1 for f in form_images if str(f) in processed_files)
+            print(f"Resuming from checkpoint, skipping {skipped_count} already processed files")
+        
         for i, image_file in enumerate(form_images):
+            # Skip already processed files if resuming
+            if str(image_file) in processed_files:
+                print(f"Skipping already processed file: {image_file.name}")
+                continue
+                
             print(f"\nProcessing form {i+1}/{len(form_images)}: {image_file.name}")
             try:
                 # Process with both models
-                gemini_data = process_with_gemini(gemini_client, image_file)
-                print("✓ Gemini processing complete")
-                llama_data = process_with_llama(llama_client, image_file, args.site_url, args.site_name)
-                print("✓ Llama processing complete")
+                gemini_data = None
+                llama_data = None
                 
-                # Compare and merge results
-                merged_data, has_discrepancies, discrepancies = compare_results(gemini_data, llama_data)
-                results_list.append(merged_data)
+                if gemini_client:
+                    try:
+                        gemini_data = process_with_gemini(gemini_client, image_file, timeout=args.timeout, max_retries=args.max_retries)
+                        print("✓ Gemini processing complete")
+                    except Exception as e:
+                        print(f"Error processing with Gemini {image_file}: {e}")
+                        gemini_data = UTELFormData()
                 
-                if has_discrepancies:
-                    print(f"⚠ Found discrepancies in form {image_file.name}")
-                    discrepancies_list.append({
-                        "file": str(image_file),
-                        "discrepancies": discrepancies
-                    })
-                else:
-                    print(f"✓ Both models agree on all fields for {image_file.name}")
+                if llama_client:
+                    try:
+                        llama_data = process_with_llama(llama_client, image_file, args.site_url, args.site_name, timeout=args.timeout, max_retries=args.max_retries)
+                        print("✓ Llama processing complete")
+                    except Exception as e:
+                        print(f"Error processing with Llama {image_file}: {e}")
+                        llama_data = UTELFormData()
+                
+                # Compare and merge results only if at least one model succeeded
+                if gemini_data or llama_data:
+                    merged_data, has_discrepancies, discrepancies = compare_results(gemini_data, llama_data)
+                    results_list.append(merged_data)
                     
+                    if has_discrepancies:
+                        print(f"⚠ Found discrepancies in form {image_file.name}")
+                        discrepancies_list.append({
+                            "file": str(image_file),
+                            "discrepancies": discrepancies
+                        })
+                    else:
+                        print(f"✓ Models agree on all fields for {image_file.name}")
+                else:
+                    print(f"⚠ Both models failed to process {image_file.name}")
+                    
+                # Save the extracted data to CSV incrementally
+                save_to_csv([merged_data], args.output, include_verification=args.verification, append=True)
+                print(f"Data appended to {args.output}")
+                
+                # Save discrepancies incrementally if requested
+                if discrepancies_list and args.discrepancies:
+                    save_discrepancies([discrepancies_list[-1]], args.discrepancies, append=True)
+                
+                # Save checkpoint
+                if not processed_files:
+                    processed_files = []
+                processed_files.append(str(image_file))
+                checkpoint_data = {
+                    'processed_files': processed_files
+                }
+                save_checkpoint(args.checkpoint_file, checkpoint_data)
+                print(f"Checkpoint saved, {len(processed_files)} files processed so far")
+                
             except Exception as e:
                 print(f"Failed to process {image_file.name}: {str(e)}")
+                continue  # Continue with next image even if this one fails
     
     else:
         raise ValueError(f"Invalid input path: {input_path}")
     
-    # Save the extracted data to CSV
-    save_to_csv(results_list, args.output, include_verification=args.verification)
-    
-    # Save discrepancies if requested
-    if discrepancies_list and args.discrepancies:
-        save_discrepancies(discrepancies_list, args.discrepancies)
-        
     # Print summary
     print("\nProcessing Summary:")
     print(f"Total forms processed: {len(results_list)}")
