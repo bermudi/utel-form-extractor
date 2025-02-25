@@ -4,11 +4,23 @@ import argparse
 import time
 import json
 import base64
+import logging
+import dotenv
 from pathlib import Path
 from typing import Optional, Dict
 from pydantic import BaseModel, Field
 from google import genai
 from openai import OpenAI
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
+
+# Configure logging for generous console output
+logging.basicConfig(
+    level=logging.DEBUG,  # Set to DEBUG to see detailed logging; change to INFO for less verbosity.
+    format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 # Custom schema matching the UTEL University feedback form
 class UTELFormData(BaseModel):
@@ -24,22 +36,26 @@ class UTELFormData(BaseModel):
 
 def setup_gemini_client():
     """Set up and return the Gemini API client"""
+    logging.info("Setting up Gemini API client.")
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY environment variable not set. "
-            "Please set it with your API key from Google AI Studio."
-        )
+        error_msg = ("GEMINI_API_KEY environment variable not set. "
+                     "Please set it with your API key from Google AI Studio.")
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+    logging.debug("Gemini API key found. Initializing client.")
     return genai.Client(api_key=api_key)
 
 def setup_llama_client():
     """Set up and return the OpenAI client for OpenRouter/Llama"""
+    logging.info("Setting up Llama client using OPENROUTER_API_KEY.")
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise ValueError(
-            "OPENROUTER_API_KEY environment variable not set. "
-            "Please set it with your API key from OpenRouter."
-        )
+        error_msg = ("OPENROUTER_API_KEY environment variable not set. "
+                     "Please set it with your API key from OpenRouter.")
+        logging.error(error_msg)
+        raise ValueError(error_msg)
+    logging.debug("Llama API key found. Initializing client.")
     return OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
@@ -47,10 +63,12 @@ def setup_llama_client():
 
 def process_with_gemini(client, image_path):
     """Process a UTEL University feedback form with Gemini"""
+    logging.info(f"Processing image with Gemini: {image_path}")
     try:
         # Read the image file
         with open(image_path, "rb") as f:
             image_bytes = f.read()
+        logging.debug(f"Read {len(image_bytes)} bytes from {image_path}.")
         
         # Determine mime type based on file extension
         ext = Path(image_path).suffix.lower()
@@ -61,6 +79,7 @@ def process_with_gemini(client, image_path):
             mime_type = "image/jpeg"
         elif ext == ".webp":
             mime_type = "image/webp"
+        logging.info(f"Determined mime type for {image_path}: {mime_type}")
         
         # Create specific prompt for UTEL form extraction
         prompt = """
@@ -76,6 +95,7 @@ def process_with_gemini(client, image_path):
         
         Return the extracted data in structured format according to the schema.
         """
+        logging.debug("Generated prompt for Gemini model.")
         
         # Generate content with structured output
         response = client.models.generate_content(
@@ -89,19 +109,22 @@ def process_with_gemini(client, image_path):
                 'response_schema': UTELFormData,
             }
         )
+        logging.info("Gemini processing complete, response received.")
         return response.parsed
             
     except Exception as e:
-        print(f"Error processing with Gemini {image_path}: {e}")
+        logging.error(f"Error processing with Gemini for {image_path}: {e}")
         raise
 
 def process_with_llama(client, image_path, site_url="https://example.com", site_name="UTEL Form Extractor"):
     """Process a UTEL University feedback form with Llama 3.2 via OpenRouter"""
+    logging.info(f"Processing image with Llama: {image_path}")
     try:
         # Convert image to base64
         with open(image_path, "rb") as f:
             image_data = f.read()
             base64_image = base64.b64encode(image_data).decode('utf-8')
+        logging.debug(f"Encoded image {image_path} to base64.")
         
         # Determine mime type based on file extension
         ext = Path(image_path).suffix.lower()
@@ -112,8 +135,10 @@ def process_with_llama(client, image_path, site_url="https://example.com", site_
             mime_type = "image/jpeg"
         elif ext == ".webp":
             mime_type = "image/webp"
+        logging.info(f"Determined mime type for {image_path}: {mime_type}")
             
         data_url = f"data:{mime_type};base64,{base64_image}"
+        logging.debug("Generated data URL for image.")
         
         prompt = """
         Extract information from this UTEL University feedback form.
@@ -130,6 +155,7 @@ def process_with_llama(client, image_path, site_url="https://example.com", site_
         
         IMPORTANT: Return ONLY a valid JSON object with these fields, nothing else.
         """
+        logging.debug("Generated prompt for Llama model.")
         
         completion = client.chat.completions.create(
             extra_headers={
@@ -156,16 +182,19 @@ def process_with_llama(client, image_path, site_url="https://example.com", site_
             ],
             response_format={"type": "json_object"}
         )
+        logging.info("Llama processing complete, response received.")
         
         # Parse the JSON response
         response_text = completion.choices[0].message.content
+        logging.debug(f"Llama response text: {response_text}")
         response_data = json.loads(response_text)
+        logging.info("Parsed Llama response into JSON successfully.")
         
         # Convert to Pydantic model
         return UTELFormData(**response_data)
             
     except Exception as e:
-        print(f"Error processing with Llama {image_path}: {e}")
+        logging.error(f"Error processing with Llama for {image_path}: {e}")
         raise
 
 def compare_results(gemini_data, llama_data):
@@ -175,6 +204,7 @@ def compare_results(gemini_data, llama_data):
     Returns:
         Tuple of (merged_data, has_discrepancies, discrepancies_dict)
     """
+    logging.info("Comparing results from Gemini and Llama.")
     # Convert to dictionaries
     if hasattr(gemini_data, 'model_dump'):
         gemini_dict = gemini_data.model_dump()
@@ -190,15 +220,12 @@ def compare_results(gemini_data, llama_data):
     else:
         llama_dict = llama_data
     
-    # Compare fields and identify discrepancies
     discrepancies = {}
     for key in gemini_dict:
         if key in llama_dict:
-            # Skip if both are None or empty
             if (not gemini_dict[key] and not llama_dict[key]):
                 continue
                 
-            # Check if values are different (ignoring case and whitespace for simple comparison)
             gemini_val = str(gemini_dict[key]).lower().strip() if gemini_dict[key] else ""
             llama_val = str(llama_dict[key]).lower().strip() if llama_dict[key] else ""
             
@@ -207,12 +234,11 @@ def compare_results(gemini_data, llama_data):
                     "gemini": gemini_dict[key],
                     "llama": llama_dict[key]
                 }
+                logging.debug(f"Discrepancy found for field '{key}': Gemini='{gemini_dict[key]}', Llama='{llama_dict[key]}'")
     
-    # Merge data with preference for values that agree
     merged_data = {}
     for key in gemini_dict:
         if key in discrepancies:
-            # For discrepancies, prefer Gemini but mark as unverified
             merged_data[key] = gemini_dict[key]
             merged_data[f"{key}_verified"] = False
         else:
@@ -220,40 +246,52 @@ def compare_results(gemini_data, llama_data):
             merged_data[f"{key}_verified"] = True
     
     has_discrepancies = len(discrepancies) > 0
+    if has_discrepancies:
+        logging.info(f"Total discrepancies found: {len(discrepancies)}")
+    else:
+        logging.info("No discrepancies found between Gemini and Llama results.")
     return merged_data, has_discrepancies, discrepancies
 
 def save_to_csv(data_list, output_file, include_verification=True):
     """Save extracted form data to a CSV file"""
+    logging.info(f"Saving extracted data to CSV file: {output_file}")
     if not data_list:
+        logging.warning("No data to save to CSV.")
         print("No data to save.")
         return
     
-    # Get field names from the first item
     field_names = list(data_list[0].keys())
     
-    # If we don't want verification fields, filter them out
     if not include_verification:
         field_names = [field for field in field_names if not field.endswith("_verified")]
         data_list = [{k: v for k, v in item.items() if not k.endswith("_verified")} 
                      for item in data_list]
     
-    # Write the data to the CSV file
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=field_names)
-        writer.writeheader()
-        writer.writerows(data_list)
-    
-    print(f"Data saved to {output_file}")
-    print(f"Processed {len(data_list)} forms successfully")
+    try:
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=field_names)
+            writer.writeheader()
+            writer.writerows(data_list)
+        logging.info(f"Data successfully saved to {output_file}")
+        logging.info(f"Total forms processed: {len(data_list)}")
+    except Exception as e:
+        logging.error(f"Error saving CSV file {output_file}: {e}")
+        raise
 
 def save_discrepancies(discrepancies_list, output_file):
     """Save discrepancies to a JSON file for review"""
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(discrepancies_list, f, ensure_ascii=False, indent=2)
-    print(f"Discrepancies saved to {output_file}")
+    logging.info(f"Saving discrepancies to JSON file: {output_file}")
+    try:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(discrepancies_list, f, ensure_ascii=False, indent=2)
+        logging.info(f"Discrepancies successfully saved to {output_file}")
+    except Exception as e:
+        logging.error(f"Error saving discrepancies to {output_file}: {e}")
+        raise
 
 def main():
     """Main function to run the UTEL form processing script"""
+    logging.info("Starting UTEL form processing script.")
     parser = argparse.ArgumentParser(description='Extract data from UTEL University feedback forms using multiple LLMs')
     parser.add_argument('--input', required=True, help='Path to a form image or directory of form images')
     parser.add_argument('--output', required=True, help='Path to the output CSV file')
@@ -263,76 +301,70 @@ def main():
     parser.add_argument('--discrepancies', help='Path to save discrepancies JSON file (optional)')
     args = parser.parse_args()
     
+    logging.debug(f"Arguments received: {args}")
+    
     # Setup clients
     gemini_client = setup_gemini_client()
     llama_client = setup_llama_client()
     
     input_path = Path(args.input)
-    
-    # Process single image or directory of images
     results_list = []
     discrepancies_list = []
     
     if input_path.is_file():
-        # Process a single form image
-        print(f"Processing single form: {input_path}")
+        logging.info(f"Processing single form: {input_path}")
         try:
-            # Process with both models
             gemini_data = process_with_gemini(gemini_client, input_path)
-            print("✓ Gemini processing complete")
+            logging.info("✓ Gemini processing complete for the form.")
             llama_data = process_with_llama(llama_client, input_path, args.site_url, args.site_name)
-            print("✓ Llama processing complete")
+            logging.info("✓ Llama processing complete for the form.")
             
-            # Compare and merge results
             merged_data, has_discrepancies, discrepancies = compare_results(gemini_data, llama_data)
             results_list.append(merged_data)
             
             if has_discrepancies:
-                print(f"⚠ Found discrepancies in form {input_path.name}")
+                logging.warning(f"Found discrepancies in form {input_path.name}")
                 discrepancies_list.append({
                     "file": str(input_path),
                     "discrepancies": discrepancies
                 })
             else:
-                print(f"✓ Both models agree on all fields for {input_path.name}")
-                
+                logging.info(f"✓ Both models agree on all fields for {input_path.name}")
         except Exception as e:
-            print(f"Failed to process {input_path.name}: {str(e)}")
+            logging.error(f"Failed to process {input_path.name}: {str(e)}")
     
     elif input_path.is_dir():
-        # Process all form images in the directory
         image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-        form_images = [f for f in input_path.iterdir() 
-                      if f.suffix.lower() in image_extensions]
+        form_images = [f for f in input_path.iterdir() if f.suffix.lower() in image_extensions]
         
-        print(f"Found {len(form_images)} forms to process")
+        logging.info(f"Found {len(form_images)} form image(s) to process in directory.")
         for i, image_file in enumerate(form_images):
-            print(f"\nProcessing form {i+1}/{len(form_images)}: {image_file.name}")
+            logging.info(f"Processing form {i+1}/{len(form_images)}: {image_file.name}")
             try:
-                # Process with both models
                 gemini_data = process_with_gemini(gemini_client, image_file)
-                print("✓ Gemini processing complete")
+                logging.info("✓ Gemini processing complete.")
                 llama_data = process_with_llama(llama_client, image_file, args.site_url, args.site_name)
-                print("✓ Llama processing complete")
+                logging.info("✓ Llama processing complete.")
                 
-                # Compare and merge results
                 merged_data, has_discrepancies, discrepancies = compare_results(gemini_data, llama_data)
                 results_list.append(merged_data)
                 
                 if has_discrepancies:
-                    print(f"⚠ Found discrepancies in form {image_file.name}")
+                    logging.warning(f"Found discrepancies in form {image_file.name}")
                     discrepancies_list.append({
                         "file": str(image_file),
                         "discrepancies": discrepancies
                     })
                 else:
-                    print(f"✓ Both models agree on all fields for {image_file.name}")
-                    
+                    logging.info(f"✓ Both models agree on all fields for {image_file.name}")
             except Exception as e:
-                print(f"Failed to process {image_file.name}: {str(e)}")
+                logging.error(f"Failed to process {image_file.name}: {str(e)}")
+            time.sleep(10)
     
     else:
-        raise ValueError(f"Invalid input path: {input_path}")
+        error_msg = f"Invalid input path: {input_path}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
     
     # Save the extracted data to CSV
     save_to_csv(results_list, args.output, include_verification=args.verification)
@@ -342,14 +374,14 @@ def main():
         save_discrepancies(discrepancies_list, args.discrepancies)
         
     # Print summary
-    print("\nProcessing Summary:")
-    print(f"Total forms processed: {len(results_list)}")
-    print(f"Forms with discrepancies: {len(discrepancies_list)}")
+    logging.info("Processing Summary:")
+    logging.info(f"Total forms processed: {len(results_list)}")
+    logging.info(f"Forms with discrepancies: {len(discrepancies_list)}")
     if discrepancies_list:
         if args.discrepancies:
-            print(f"Discrepancies saved to: {args.discrepancies}")
+            logging.info(f"Discrepancies saved to: {args.discrepancies}")
         else:
-            print("Use --discrepancies argument to save details about the discrepancies")
+            logging.info("Use --discrepancies argument to save details about the discrepancies")
 
 if __name__ == "__main__":
     main()
